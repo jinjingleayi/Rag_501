@@ -16,8 +16,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 复制应用代码
 COPY . .
 
-# 运行数据摄取（创建向量索引）
-RUN python ingest.py
+# 赋予启动脚本可执行权限
+RUN chmod +x docker-entrypoint.sh
 
 # 暴露端口
 EXPOSE 8080
@@ -26,6 +26,6 @@ EXPOSE 8080
 ENV PORT=8080
 ENV PYTHONUNBUFFERED=1
 
-# 启动应用
-CMD ["python", "app.py"]
+# 启动脚本
+CMD ["./docker-entrypoint.sh"]
 
