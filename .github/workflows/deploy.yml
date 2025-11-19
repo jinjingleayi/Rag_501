@@ -1,0 +1,176 @@
+name: Deploy to AWS App Runner
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+  APP_RUNNER_ARN: ${{ secrets.APP_RUNNER_ARN }}
+  APP_RUNNER_ACCESS_ROLE_ARN: ${{ secrets.APP_RUNNER_ACCESS_ROLE_ARN }}
+  APP_RUNNER_INSTANCE_ROLE_ARN: ${{ secrets.APP_RUNNER_INSTANCE_ROLE_ARN }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image tag
+        id: set-image-tag
+        run: |
+          TAG=$(echo ${{ github.sha }} | cut -c1-7)
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Image tag set to: $TAG"
+
+      - name: Build, tag, and push Docker image to Amazon ECR
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          ECR_REPOSITORY: ${{ env.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ steps.set-image-tag.outputs.tag }}
+        run: |
+          echo "Building Docker image..."
+          docker build --platform linux/amd64 -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "Pushing Docker image to ECR..."
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "Image pushed successfully: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+      - name: Get App Runner service details
+        id: get-apprunner-details
+        run: |
+          # 检查服务是否存在
+          SERVICE_NAME="bee-edu-rag-service"
+          echo "service_name=$SERVICE_NAME" >> $GITHUB_OUTPUT
+          
+          # 优先使用从 Terraform outputs 获取的角色 ARNs
+          ACCESS_ROLE_ARN="${{ env.APP_RUNNER_ACCESS_ROLE_ARN }}"
+          INSTANCE_ROLE_ARN="${{ env.APP_RUNNER_INSTANCE_ROLE_ARN }}"
+          
+          # 如果 Terraform outputs 中没有，尝试从现有服务获取（如果服务已存在）
+          if [ -z "$ACCESS_ROLE_ARN" ] && [ -n "${{ env.APP_RUNNER_ARN }}" ] && [[ "${{ env.APP_RUNNER_ARN }}" =~ ^arn:aws:apprunner: ]]; then
+            echo "Service ARN provided, attempting to get service details..."
+            SERVICE_INFO=$(aws apprunner describe-service \
+              --service-arn "${{ env.APP_RUNNER_ARN }}" \
+              --region ${{ env.AWS_REGION }} \
+              --output json 2>/dev/null || echo "{}")
+            
+            ACCESS_ROLE_ARN=$(echo $SERVICE_INFO | jq -r '.Service.SourceConfiguration.AuthenticationConfiguration.AccessRoleArn // empty' 2>/dev/null || echo "")
+            INSTANCE_ROLE_ARN=$(echo $SERVICE_INFO | jq -r '.Service.InstanceConfiguration.InstanceRoleArn // empty' 2>/dev/null || echo "")
+          fi
+          
+          # 验证角色 ARNs
+          if [ -z "$ACCESS_ROLE_ARN" ] || [ "$ACCESS_ROLE_ARN" == "null" ] || [ "$ACCESS_ROLE_ARN" == "" ]; then
+            echo "Error: AccessRoleArn is required but not found"
+            echo "Please ensure APP_RUNNER_ACCESS_ROLE_ARN is set in GitHub Secrets"
+            exit 1
+          fi
+          
+          if [ -z "$INSTANCE_ROLE_ARN" ] || [ "$INSTANCE_ROLE_ARN" == "null" ] || [ "$INSTANCE_ROLE_ARN" == "" ]; then
+            echo "Error: InstanceRoleArn is required but not found"
+            echo "Please ensure APP_RUNNER_INSTANCE_ROLE_ARN is set in GitHub Secrets"
+            exit 1
+          fi
+          
+          echo "access_role_arn=$ACCESS_ROLE_ARN" >> $GITHUB_OUTPUT
+          echo "instance_role_arn=$INSTANCE_ROLE_ARN" >> $GITHUB_OUTPUT
+          echo "Access Role ARN: $ACCESS_ROLE_ARN"
+          echo "Instance Role ARN: $INSTANCE_ROLE_ARN"
+
+      - name: Get Secrets Manager ARN
+        id: get-secrets-arn
+        run: |
+          # 获取 Secrets Manager secret ARN
+          SECRET_ARN=$(aws secretsmanager describe-secret \
+            --secret-id "bee-edu-openai-key-secret" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'ARN' \
+            --output text 2>/dev/null || echo "")
+          
+          if [ -z "$SECRET_ARN" ] || [ "$SECRET_ARN" == "None" ]; then
+            echo "Warning: Secret 'bee-edu-openai-key-secret' not found in Secrets Manager"
+            echo "secret_arn=" >> $GITHUB_OUTPUT
+          else
+            echo "secret_arn=$SECRET_ARN" >> $GITHUB_OUTPUT
+            echo "Found secret ARN: $SECRET_ARN"
+          fi
+
+      - name: Deploy to AWS App Runner
+        uses: awslabs/amazon-app-runner-deploy@main
+        with:
+          service: ${{ steps.get-apprunner-details.outputs.service_name }}
+          image: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.set-image-tag.outputs.tag }}
+          region: ${{ env.AWS_REGION }}
+          access-role-arn: ${{ steps.get-apprunner-details.outputs.access_role_arn }}
+          instance-role-arn: ${{ steps.get-apprunner-details.outputs.instance_role_arn }}
+          port: 8080
+          cpu: 1
+          memory: 2
+          wait-for-service-stability-seconds: 600
+
+      - name: Update App Runner service with Secrets Manager configuration
+        if: steps.get-secrets-arn.outputs.secret_arn != ''
+        run: |
+          # 获取服务 ARN（如果已存在）
+          if [ -n "${{ env.APP_RUNNER_ARN }}" ] && [[ "${{ env.APP_RUNNER_ARN }}" =~ ^arn:aws:apprunner: ]]; then
+            SERVICE_ARN="${{ env.APP_RUNNER_ARN }}"
+          else
+            # 如果服务 ARN 未提供，尝试通过服务名称查找
+            SERVICE_ARN=$(aws apprunner list-services \
+              --region ${{ env.AWS_REGION }} \
+              --query "ServiceSummaryList[?ServiceName=='${{ steps.get-apprunner-details.outputs.service_name }}'].ServiceArn" \
+              --output text)
+          fi
+          
+          if [ -n "$SERVICE_ARN" ] && [ "$SERVICE_ARN" != "None" ]; then
+            echo "Updating service configuration with Secrets Manager..."
+            # 获取当前服务配置
+            CURRENT_CONFIG=$(aws apprunner describe-service \
+              --service-arn "$SERVICE_ARN" \
+              --region ${{ env.AWS_REGION }} \
+              --output json)
+            
+            # 更新服务配置以包含 Secrets Manager
+            aws apprunner update-service \
+              --service-arn "$SERVICE_ARN" \
+              --source-configuration '{
+                "ImageRepository": {
+                  "ImageIdentifier": "'${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.set-image-tag.outputs.tag }}'",
+                  "ImageRepositoryType": "ECR",
+                  "ImageConfiguration": {
+                    "Port": "8080",
+                    "RuntimeEnvironmentSecrets": {
+                      "OPENAI_API_KEY": "'${{ steps.get-secrets-arn.outputs.secret_arn }}'"
+                    }
+                  }
+                },
+                "AuthenticationConfiguration": {
+                  "AccessRoleArn": "'${{ steps.get-apprunner-details.outputs.access_role_arn }}'"
+                }
+              }' \
+              --region ${{ env.AWS_REGION }}
+            
+            echo "Service configuration updated successfully"
+          else
+            echo "Service ARN not found, skipping secrets configuration update"
+          fi
+
