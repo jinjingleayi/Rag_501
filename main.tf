@@ -93,6 +93,23 @@ resource "aws_iam_policy" "github_actions_policy" {
           aws_iam_role.apprunner_instance_role.arn,
           aws_iam_role.apprunner_service_role.arn
         ]
+      },
+      {
+        Effect = "Allow",
+        Action = [
+          "iam:GetRole"
+        ],
+        Resource = [
+          aws_iam_role.apprunner_instance_role.arn,
+          aws_iam_role.apprunner_service_role.arn
+        ]
+      },
+      {
+        Effect = "Allow",
+        Action = [
+          "iam:CreateServiceLinkedRole"
+        ],
+        Resource = "arn:aws:iam::*:role/aws-service-role/apprunner.amazonaws.com/*"
       }
     ]
   })
