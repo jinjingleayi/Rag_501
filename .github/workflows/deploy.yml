@@ -65,16 +65,14 @@ jobs:
           ACCESS_ROLE_NAME="bee-edu-apprunner-role"
           INSTANCE_ROLE_NAME="bee-edu-apprunner-instance-role"
           
-          # 通过 AWS CLI 获取角色 ARN
+          # 通过 AWS CLI 获取角色 ARN（IAM 是全局服务，不需要 region）
           ACCESS_ROLE_ARN=$(aws iam get-role \
             --role-name "$ACCESS_ROLE_NAME" \
-            --region ${{ env.AWS_REGION }} \
             --query 'Role.Arn' \
             --output text 2>/dev/null || echo "")
           
           INSTANCE_ROLE_ARN=$(aws iam get-role \
             --role-name "$INSTANCE_ROLE_NAME" \
-            --region ${{ env.AWS_REGION }} \
             --query 'Role.Arn' \
             --output text 2>/dev/null || echo "")
           
