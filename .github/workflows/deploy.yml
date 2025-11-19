@@ -13,8 +13,6 @@ env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
   ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
   APP_RUNNER_ARN: ${{ secrets.APP_RUNNER_ARN }}
-  APP_RUNNER_ACCESS_ROLE_ARN: ${{ secrets.APP_RUNNER_ACCESS_ROLE_ARN }}
-  APP_RUNNER_INSTANCE_ROLE_ARN: ${{ secrets.APP_RUNNER_INSTANCE_ROLE_ARN }}
 
 jobs:
   deploy:
@@ -62,11 +60,25 @@ jobs:
           SERVICE_NAME="bee-edu-rag-service"
           echo "service_name=$SERVICE_NAME" >> $GITHUB_OUTPUT
           
-          # 优先使用从 Terraform outputs 获取的角色 ARNs
-          ACCESS_ROLE_ARN="${{ env.APP_RUNNER_ACCESS_ROLE_ARN }}"
-          INSTANCE_ROLE_ARN="${{ env.APP_RUNNER_INSTANCE_ROLE_ARN }}"
+          # 动态获取角色 ARNs（根据 Terraform 创建的角色名称）
+          # 角色名称是固定的：bee-edu-apprunner-role 和 bee-edu-apprunner-instance-role
+          ACCESS_ROLE_NAME="bee-edu-apprunner-role"
+          INSTANCE_ROLE_NAME="bee-edu-apprunner-instance-role"
           
-          # 如果 Terraform outputs 中没有，尝试从现有服务获取（如果服务已存在）
+          # 通过 AWS CLI 获取角色 ARN
+          ACCESS_ROLE_ARN=$(aws iam get-role \
+            --role-name "$ACCESS_ROLE_NAME" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'Role.Arn' \
+            --output text 2>/dev/null || echo "")
+          
+          INSTANCE_ROLE_ARN=$(aws iam get-role \
+            --role-name "$INSTANCE_ROLE_NAME" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'Role.Arn' \
+            --output text 2>/dev/null || echo "")
+          
+          # 如果服务已存在，也可以从服务配置中获取（作为备选）
           if [ -z "$ACCESS_ROLE_ARN" ] && [ -n "${{ env.APP_RUNNER_ARN }}" ] && [[ "${{ env.APP_RUNNER_ARN }}" =~ ^arn:aws:apprunner: ]]; then
             echo "Service ARN provided, attempting to get service details..."
             SERVICE_INFO=$(aws apprunner describe-service \
@@ -79,15 +91,15 @@ jobs:
           fi
           
           # 验证角色 ARNs
-          if [ -z "$ACCESS_ROLE_ARN" ] || [ "$ACCESS_ROLE_ARN" == "null" ] || [ "$ACCESS_ROLE_ARN" == "" ]; then
+          if [ -z "$ACCESS_ROLE_ARN" ] || [ "$ACCESS_ROLE_ARN" == "None" ] || [ "$ACCESS_ROLE_ARN" == "" ]; then
             echo "Error: AccessRoleArn is required but not found"
-            echo "Please ensure APP_RUNNER_ACCESS_ROLE_ARN is set in GitHub Secrets"
+            echo "Please ensure the role 'bee-edu-apprunner-role' exists in AWS"
             exit 1
           fi
           
-          if [ -z "$INSTANCE_ROLE_ARN" ] || [ "$INSTANCE_ROLE_ARN" == "null" ] || [ "$INSTANCE_ROLE_ARN" == "" ]; then
+          if [ -z "$INSTANCE_ROLE_ARN" ] || [ "$INSTANCE_ROLE_ARN" == "None" ] || [ "$INSTANCE_ROLE_ARN" == "" ]; then
             echo "Error: InstanceRoleArn is required but not found"
-            echo "Please ensure APP_RUNNER_INSTANCE_ROLE_ARN is set in GitHub Secrets"
+            echo "Please ensure the role 'bee-edu-apprunner-instance-role' exists in AWS"
             exit 1
           fi
           

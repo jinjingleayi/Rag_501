@@ -1,0 +1,24 @@
+# Terraform 输出值 - 用于配置 GitHub Secrets
+
+## 重要：请将这些值添加到 GitHub Secrets（只需要4个！）
+
+### 1. AWS_REGION
+值: us-east-1
+
+### 2. ECR_REPOSITORY
+值: bee-edu-rag-app
+
+### 3. APP_RUNNER_ARN
+值: (留空 - 服务将由 GitHub Actions 创建)
+
+### 4. AWS_IAM_ROLE_TO_ASSUME
+值: arn:aws:iam::542335186724:role/github-actions-deploy-role
+
+---
+
+## 注意
+
+不需要添加以下两个 Secrets（workflow 会自动从 AWS 获取）：
+- APP_RUNNER_ACCESS_ROLE_ARN（会自动获取）
+- APP_RUNNER_INSTANCE_ROLE_ARN（会自动获取）
+
