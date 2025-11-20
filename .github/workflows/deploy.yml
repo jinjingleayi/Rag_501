@@ -124,63 +124,138 @@ jobs:
             echo "Found secret ARN: $SECRET_ARN"
           fi
 
-      - name: Deploy to AWS App Runner
-        uses: awslabs/amazon-app-runner-deploy@main
-        with:
-          service: ${{ steps.get-apprunner-details.outputs.service_name }}
-          image: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.set-image-tag.outputs.tag }}
-          region: ${{ env.AWS_REGION }}
-          access-role-arn: ${{ steps.get-apprunner-details.outputs.access_role_arn }}
-          instance-role-arn: ${{ steps.get-apprunner-details.outputs.instance_role_arn }}
-          port: 8080
-          cpu: 1
-          memory: 2
-          wait-for-service-stability-seconds: 600
+      - name: Check if App Runner service exists
+        id: check-service
+        run: |
+          SERVICE_NAME="${{ steps.get-apprunner-details.outputs.service_name }}"
+          EXISTING_SERVICE=$(aws apprunner list-services \
+            --region ${{ env.AWS_REGION }} \
+            --query "ServiceSummaryList[?ServiceName=='$SERVICE_NAME'].ServiceArn" \
+            --output text 2>/dev/null || echo "")
+          
+          if [ -n "$EXISTING_SERVICE" ] && [ "$EXISTING_SERVICE" != "None" ]; then
+            # 检查服务状态
+            SERVICE_STATUS=$(aws apprunner describe-service \
+              --service-arn "$EXISTING_SERVICE" \
+              --region ${{ env.AWS_REGION }} \
+              --query 'Service.Status' \
+              --output text 2>/dev/null || echo "")
+            
+            if [ "$SERVICE_STATUS" = "CREATE_FAILED" ] || [ "$SERVICE_STATUS" = "DELETE_FAILED" ]; then
+              echo "Service exists but in failed state, will delete and recreate"
+              echo "service_exists=false" >> $GITHUB_OUTPUT
+              echo "service_arn=$EXISTING_SERVICE" >> $GITHUB_OUTPUT
+            else
+              echo "Service exists: $EXISTING_SERVICE"
+              echo "service_exists=true" >> $GITHUB_OUTPUT
+              echo "service_arn=$EXISTING_SERVICE" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "Service does not exist"
+            echo "service_exists=false" >> $GITHUB_OUTPUT
+            echo "service_arn=" >> $GITHUB_OUTPUT
+          fi
 
-      - name: Update App Runner service with Secrets Manager configuration
+      - name: Delete failed service if exists
+        if: steps.check-service.outputs.service_exists == 'false' && steps.check-service.outputs.service_arn != ''
+        run: |
+          echo "Deleting failed service: ${{ steps.check-service.outputs.service_arn }}"
+          aws apprunner delete-service \
+            --service-arn "${{ steps.check-service.outputs.service_arn }}" \
+            --region ${{ env.AWS_REGION }} || true
+          echo "Waiting for service deletion..."
+          sleep 10
+
+      - name: Deploy to AWS App Runner (with Secrets Manager)
         if: steps.get-secrets-arn.outputs.secret_arn != ''
         run: |
-          # 获取服务 ARN（如果已存在）
-          if [ -n "${{ env.APP_RUNNER_ARN }}" ] && [[ "${{ env.APP_RUNNER_ARN }}" =~ ^arn:aws:apprunner: ]]; then
-            SERVICE_ARN="${{ env.APP_RUNNER_ARN }}"
-          else
-            # 如果服务 ARN 未提供，尝试通过服务名称查找
-            SERVICE_ARN=$(aws apprunner list-services \
-              --region ${{ env.AWS_REGION }} \
-              --query "ServiceSummaryList[?ServiceName=='${{ steps.get-apprunner-details.outputs.service_name }}'].ServiceArn" \
-              --output text)
-          fi
+          SERVICE_NAME="${{ steps.get-apprunner-details.outputs.service_name }}"
+          IMAGE_URI="${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.set-image-tag.outputs.tag }}"
           
-          if [ -n "$SERVICE_ARN" ] && [ "$SERVICE_ARN" != "None" ]; then
-            echo "Updating service configuration with Secrets Manager..."
-            # 获取当前服务配置
-            CURRENT_CONFIG=$(aws apprunner describe-service \
-              --service-arn "$SERVICE_ARN" \
-              --region ${{ env.AWS_REGION }} \
-              --output json)
-            
-            # 更新服务配置以包含 Secrets Manager
+          # 检查服务是否存在且正常运行
+          EXISTING_SERVICE=$(aws apprunner list-services \
+            --region ${{ env.AWS_REGION }} \
+            --query "ServiceSummaryList[?ServiceName=='$SERVICE_NAME' && Status=='RUNNING'].ServiceArn" \
+            --output text 2>/dev/null || echo "")
+          
+          if [ -n "$EXISTING_SERVICE" ] && [ "$EXISTING_SERVICE" != "None" ]; then
+            echo "Service exists, updating..."
             aws apprunner update-service \
-              --service-arn "$SERVICE_ARN" \
-              --source-configuration '{
-                "ImageRepository": {
-                  "ImageIdentifier": "'${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.set-image-tag.outputs.tag }}'",
-                  "ImageRepositoryType": "ECR",
-                  "ImageConfiguration": {
-                    "Port": "8080",
-                    "RuntimeEnvironmentSecrets": {
-                      "OPENAI_API_KEY": "'${{ steps.get-secrets-arn.outputs.secret_arn }}'"
+              --service-arn "$EXISTING_SERVICE" \
+              --region ${{ env.AWS_REGION }} \
+              --source-configuration "{
+                \"ImageRepository\": {
+                  \"ImageIdentifier\": \"$IMAGE_URI\",
+                  \"ImageRepositoryType\": \"ECR\",
+                  \"ImageConfiguration\": {
+                    \"Port\": \"8080\",
+                    \"RuntimeEnvironmentSecrets\": {
+                      \"OPENAI_API_KEY\": \"${{ steps.get-secrets-arn.outputs.secret_arn }}\"
                     }
                   }
                 },
-                "AuthenticationConfiguration": {
-                  "AccessRoleArn": "'${{ steps.get-apprunner-details.outputs.access_role_arn }}'"
+                \"AuthenticationConfiguration\": {
+                  \"AccessRoleArn\": \"${{ steps.get-apprunner-details.outputs.access_role_arn }}\"
                 }
-              }' \
-              --region ${{ env.AWS_REGION }}
-            
-            echo "Service configuration updated successfully"
+              }" \
+              --instance-configuration "{
+                \"Cpu\": \"1024\",
+                \"Memory\": \"2048\",
+                \"InstanceRoleArn\": \"${{ steps.get-apprunner-details.outputs.instance_role_arn }}\"
+              }"
           else
-            echo "Service ARN not found, skipping secrets configuration update"
+            echo "Creating new service with Secrets Manager..."
+            aws apprunner create-service \
+              --service-name "$SERVICE_NAME" \
+              --region ${{ env.AWS_REGION }} \
+              --source-configuration "{
+                \"ImageRepository\": {
+                  \"ImageIdentifier\": \"$IMAGE_URI\",
+                  \"ImageRepositoryType\": \"ECR\",
+                  \"ImageConfiguration\": {
+                    \"Port\": \"8080\",
+                    \"RuntimeEnvironmentSecrets\": {
+                      \"OPENAI_API_KEY\": \"${{ steps.get-secrets-arn.outputs.secret_arn }}\"
+                    }
+                  }
+                },
+                \"AuthenticationConfiguration\": {
+                  \"AccessRoleArn\": \"${{ steps.get-apprunner-details.outputs.access_role_arn }}\"
+                }
+              }" \
+              --instance-configuration "{
+                \"Cpu\": \"1024\",
+                \"Memory\": \"2048\",
+                \"InstanceRoleArn\": \"${{ steps.get-apprunner-details.outputs.instance_role_arn }}\"
+              }" \
+              --auto-scaling-configuration-arn "arn:aws:apprunner:${{ env.AWS_REGION }}:542335186724:autoscalingconfiguration/DefaultConfiguration/1/00000000000000000000000000000001"
+          fi
+
+      - name: Wait for service stability
+        run: |
+          SERVICE_NAME="${{ steps.get-apprunner-details.outputs.service_name }}"
+          echo "Waiting for service to become stable..."
+          
+          for i in {1..60}; do
+            SERVICE_STATUS=$(aws apprunner list-services \
+              --region ${{ env.AWS_REGION }} \
+              --query "ServiceSummaryList[?ServiceName=='$SERVICE_NAME'].Status" \
+              --output text 2>/dev/null || echo "")
+            
+            if [ "$SERVICE_STATUS" = "RUNNING" ]; then
+              echo "Service is RUNNING!"
+              break
+            elif [ "$SERVICE_STATUS" = "CREATE_FAILED" ] || [ "$SERVICE_STATUS" = "UPDATE_FAILED" ]; then
+              echo "Service creation/update failed!"
+              exit 1
+            fi
+            
+            echo "Service status: $SERVICE_STATUS (attempt $i/60)"
+            sleep 10
+          done
+          
+          if [ "$SERVICE_STATUS" != "RUNNING" ]; then
+            echo "Service did not reach RUNNING state in time"
+            exit 1
           fi
 
