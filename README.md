@@ -105,16 +105,72 @@ git push -u origin main
    - 访问 App Runner URL
    - 在网页中输入问题测试 RAG 功能
 
-### 6. 配置 Cloudflare 域名（可选）
+### 6. Configure Cloudflare Custom Domain (Optional)
 
-1. 登录您的 Cloudflare 账户
-2. 选择您的域名
-3. 进入 **DNS** 设置
-4. 添加 **CNAME** 记录：
-   - **名称**：`rag`（或您想要的子域名）
-   - **目标**：App Runner 的 URL（例如：`xxxxx.us-east-1.awsapprunner.com`）
-   - **代理状态**：已代理（橙色云朵）
-5. 等待 DNS 传播（通常几分钟）
+To use a custom domain with your App Runner service:
+
+#### Step 1: Add Custom Domain in App Runner
+
+First, you need to associate your custom domain with the App Runner service:
+
+```bash
+# Get your service ARN
+SERVICE_ARN=$(aws apprunner list-services \
+  --region us-east-1 \
+  --query "ServiceSummaryList[?ServiceName=='bee-edu-rag-service'].ServiceArn" \
+  --output text)
+
+# Associate custom domain
+aws apprunner associate-custom-domain \
+  --service-arn "$SERVICE_ARN" \
+  --domain-name rag.yourdomain.com \
+  --region us-east-1
+```
+
+This will return DNS validation records that need to be added to Cloudflare.
+
+#### Step 2: Configure DNS in Cloudflare
+
+1. Log in to your Cloudflare account: https://dash.cloudflare.com/
+2. Select your domain
+3. Go to **DNS** → **Records**
+4. Add the main **CNAME** record:
+   - **Type**: CNAME
+   - **Name**: `rag` (or your desired subdomain)
+   - **Target**: Your App Runner URL (e.g., `ugxaymsvp3.us-east-1.awsapprunner.com`)
+   - **Proxy status**: ⚪ **DNS only** (gray cloud, **NOT** proxied/orange cloud)
+   - Click **Save**
+
+5. Add SSL certificate validation records:
+   - App Runner will provide 2-3 CNAME records for SSL certificate validation
+   - Add each validation record as a CNAME:
+     - **Type**: CNAME
+     - **Name**: The validation record name (e.g., `_xxxxx.rag`)
+     - **Target**: The validation target (e.g., `_xxxxx.acm-validations.aws.`)
+     - **Proxy status**: ⚪ **DNS only** (gray cloud, **required** for validation)
+   - These are temporary records for SSL certificate validation
+
+#### Step 3: Wait for SSL Certificate Validation
+
+- Wait 10-30 minutes for AWS to validate the DNS records and issue the SSL certificate
+- Check the status:
+  ```bash
+  aws apprunner describe-custom-domains \
+    --service-arn "$SERVICE_ARN" \
+    --region us-east-1
+  ```
+- When status changes to `active`, your custom domain is ready
+
+#### Step 4: Verify Access
+
+Once the domain status is `active`, you can access your application at:
+- `https://rag.yourdomain.com`
+
+**Important Notes:**
+- Use **DNS only** (gray cloud) for all CNAME records, not Proxied (orange cloud)
+- App Runner handles SSL certificates automatically through AWS Certificate Manager
+- DNS propagation typically takes 5-15 minutes
+- SSL certificate validation may take 10-30 minutes
 
 ## 本地开发
 
