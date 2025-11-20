@@ -298,7 +298,39 @@ jobs:
           SERVICE_EXISTS="${{ steps.check-service.outputs.service_exists }}"
           
           if [ "$SERVICE_EXISTS" = "true" ] && [ -n "$EXISTING_SERVICE" ] && [ "$EXISTING_SERVICE" != "None" ]; then
-            echo "Service exists, updating..."
+            # Check service status before updating
+            CURRENT_STATUS=$(aws apprunner describe-service \
+              --service-arn "$EXISTING_SERVICE" \
+              --region ${{ env.AWS_REGION }} \
+              --query 'Service.Status' \
+              --output text 2>/dev/null || echo "UNKNOWN")
+            
+            echo "Service exists with status: $CURRENT_STATUS"
+            
+            # Wait if service is in progress
+            if [ "$CURRENT_STATUS" = "OPERATION_IN_PROGRESS" ]; then
+              echo "Service is currently in progress. Waiting for it to complete..."
+              for i in {1..30}; do
+                sleep 10
+                CURRENT_STATUS=$(aws apprunner describe-service \
+                  --service-arn "$EXISTING_SERVICE" \
+                  --region ${{ env.AWS_REGION }} \
+                  --query 'Service.Status' \
+                  --output text 2>/dev/null || echo "UNKNOWN")
+                echo "Current status: $CURRENT_STATUS (wait $i/30)"
+                
+                if [ "$CURRENT_STATUS" = "RUNNING" ] || [ "$CURRENT_STATUS" = "CREATE_FAILED" ] || [ "$CURRENT_STATUS" = "UPDATE_FAILED" ]; then
+                  break
+                fi
+              done
+              
+              if [ "$CURRENT_STATUS" = "OPERATION_IN_PROGRESS" ]; then
+                echo "⚠️  Service still in progress after 5 minutes. Proceeding with update anyway..."
+              fi
+            fi
+            
+            echo "Attempting to update service..."
+            set +e
             UPDATE_RESULT=$(aws apprunner update-service \
               --service-arn "$EXISTING_SERVICE" \
               --region ${{ env.AWS_REGION }} \
@@ -306,13 +338,36 @@ jobs:
               --instance-configuration file:///tmp/instance-config.json \
               --health-check-configuration file:///tmp/health-check-config.json \
               --output json 2>&1)
+            UPDATE_EXIT_CODE=$?
+            set -e
             
-            if [ $? -eq 0 ]; then
+            if [ $UPDATE_EXIT_CODE -eq 0 ]; then
               echo "Service update initiated successfully"
-              echo "$UPDATE_RESULT" | jq '.'
+              echo "$UPDATE_RESULT" | jq '.' || echo "$UPDATE_RESULT"
             else
-              echo "Error updating service:"
+              echo "=== Error updating service ==="
+              echo "Exit code: $UPDATE_EXIT_CODE"
+              echo "Error output:"
               echo "$UPDATE_RESULT"
+              
+              # Try to extract error message
+              ERROR_MSG=$(echo "$UPDATE_RESULT" | jq -r '.message // .Message // .' 2>/dev/null || echo "$UPDATE_RESULT")
+              echo ""
+              echo "Error message: $ERROR_MSG"
+              
+              # Check for specific error types
+              if echo "$UPDATE_RESULT" | grep -qi "InvalidRequestException"; then
+                echo ""
+                echo "⚠️  Invalid request. This might be because:"
+                echo "   - Service is in a state that doesn't allow updates"
+                echo "   - Configuration conflicts with current service state"
+              fi
+              
+              if echo "$UPDATE_RESULT" | grep -qi "ResourceNotFoundException"; then
+                echo ""
+                echo "⚠️  Service not found. It may have been deleted."
+              fi
+              
               exit 1
             fi
           else
