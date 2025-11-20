@@ -106,35 +106,71 @@ jobs:
           echo "Access Role ARN: $ACCESS_ROLE_ARN"
           echo "Instance Role ARN: $INSTANCE_ROLE_ARN"
 
-      - name: Get Secrets Manager ARN
+      - name: Get or Create Secrets Manager Secret
         id: get-secrets-arn
         run: |
-          # 获取 Secrets Manager secret ARN
+          SECRET_NAME="bee-edu-openai-key-secret"
+          
+          # 尝试获取现有的 secret
           SECRET_ARN=$(aws secretsmanager describe-secret \
-            --secret-id "bee-edu-openai-key-secret" \
+            --secret-id "$SECRET_NAME" \
             --region ${{ env.AWS_REGION }} \
             --query 'ARN' \
             --output text 2>/dev/null || echo "")
           
           if [ -z "$SECRET_ARN" ] || [ "$SECRET_ARN" == "None" ]; then
-            echo "Error: Secret 'bee-edu-openai-key-secret' not found in Secrets Manager"
-            echo "Please ensure the secret exists in region ${{ env.AWS_REGION }}"
-            echo "secret_arn=" >> $GITHUB_OUTPUT
-            exit 1
-          else
-            # 验证 ARN 格式
-            if [[ ! "$SECRET_ARN" =~ ^arn:aws:secretsmanager: ]]; then
-              echo "Error: Invalid secret ARN format: $SECRET_ARN"
+            echo "Secret '$SECRET_NAME' not found. Attempting to create it..."
+            
+            # 检查是否有 GitHub Secret 提供 API Key
+            if [ -z "${{ secrets.OPENAI_API_KEY }}" ]; then
+              echo "Error: Secret '$SECRET_NAME' not found in AWS Secrets Manager"
+              echo "And GitHub Secret 'OPENAI_API_KEY' is not set."
+              echo ""
+              echo "Please do one of the following:"
+              echo "1. Run 'terraform apply' to create the secret, OR"
+              echo "2. Add 'OPENAI_API_KEY' as a GitHub Secret to allow automatic creation"
+              echo ""
+              echo "To add GitHub Secret:"
+              echo "  - Go to: https://github.com/${{ github.repository }}/settings/secrets/actions"
+              echo "  - Click 'New repository secret'"
+              echo "  - Name: OPENAI_API_KEY"
+              echo "  - Value: your-openai-api-key"
+              echo "secret_arn=" >> $GITHUB_OUTPUT
               exit 1
             fi
-            echo "secret_arn=$SECRET_ARN" >> $GITHUB_OUTPUT
-            echo "Found secret ARN: $SECRET_ARN"
             
-            # 验证实例角色是否有权限读取该 secret
-            INSTANCE_ROLE_ARN="${{ steps.get-apprunner-details.outputs.instance_role_arn }}"
-            echo "Verifying instance role permissions..."
-            echo "Instance Role ARN: $INSTANCE_ROLE_ARN"
+            # 创建 secret
+            echo "Creating secret '$SECRET_NAME' in AWS Secrets Manager..."
+            CREATE_RESULT=$(aws secretsmanager create-secret \
+              --name "$SECRET_NAME" \
+              --secret-string "${{ secrets.OPENAI_API_KEY }}" \
+              --region ${{ env.AWS_REGION }} \
+              --query 'ARN' \
+              --output text 2>&1)
+            
+            if [ $? -eq 0 ] && [[ "$CREATE_RESULT" =~ ^arn:aws:secretsmanager: ]]; then
+              SECRET_ARN="$CREATE_RESULT"
+              echo "Successfully created secret: $SECRET_ARN"
+            else
+              echo "Error creating secret: $CREATE_RESULT"
+              exit 1
+            fi
+          else
+            echo "Found existing secret: $SECRET_ARN"
           fi
+          
+          # 验证 ARN 格式
+          if [[ ! "$SECRET_ARN" =~ ^arn:aws:secretsmanager: ]]; then
+            echo "Error: Invalid secret ARN format: $SECRET_ARN"
+            exit 1
+          fi
+          
+          echo "secret_arn=$SECRET_ARN" >> $GITHUB_OUTPUT
+          echo "Using secret ARN: $SECRET_ARN"
+          
+          # 验证实例角色是否有权限读取该 secret
+          INSTANCE_ROLE_ARN="${{ steps.get-apprunner-details.outputs.instance_role_arn }}"
+          echo "Instance Role ARN: $INSTANCE_ROLE_ARN"
 
       - name: Check if App Runner service exists
         id: check-service

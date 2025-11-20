@@ -110,6 +110,17 @@ resource "aws_iam_policy" "github_actions_policy" {
           "iam:CreateServiceLinkedRole"
         ],
         Resource = "arn:aws:iam::*:role/aws-service-role/apprunner.amazonaws.com/*"
+      },
+      {
+        Effect = "Allow",
+        Action = [
+          "secretsmanager:DescribeSecret",
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:CreateSecret",
+          "secretsmanager:PutSecretValue",
+          "secretsmanager:UpdateSecret"
+        ],
+        Resource = "arn:aws:secretsmanager:*:*:secret:bee-edu-openai-key-secret*"
       }
     ]
   })
