@@ -444,17 +444,54 @@ jobs:
               echo "Service ARN: $SERVICE_ARN"
               break
             elif [ "$SERVICE_STATUS" = "CREATE_FAILED" ] || [ "$SERVICE_STATUS" = "UPDATE_FAILED" ]; then
-              echo "Service creation/update failed!"
+              echo "=== Service creation/update failed! ==="
               if [ -n "$SERVICE_ARN" ]; then
-                echo "Getting operation details..."
-                OPERATION_ID=$(aws apprunner list-operations \
+                echo "Service ARN: $SERVICE_ARN"
+                echo ""
+                echo "Getting service details..."
+                SERVICE_DETAILS=$(aws apprunner describe-service \
                   --service-arn "$SERVICE_ARN" \
                   --region ${{ env.AWS_REGION }} \
-                  --query 'OperationSummaryList[0].Id' \
-                  --output text 2>/dev/null || echo "")
-                if [ -n "$OPERATION_ID" ]; then
+                  --output json 2>/dev/null || echo "{}")
+                
+                # Extract error information
+                ERROR_MSG=$(echo "$SERVICE_DETAILS" | jq -r '.Service.StatusMessage // .Service.Status // "Unknown error"' 2>/dev/null || echo "Could not parse error")
+                echo "Error message: $ERROR_MSG"
+                
+                echo ""
+                echo "Getting operation details..."
+                OPERATIONS=$(aws apprunner list-operations \
+                  --service-arn "$SERVICE_ARN" \
+                  --region ${{ env.AWS_REGION }} \
+                  --output json 2>/dev/null || echo "{}")
+                
+                LATEST_OP=$(echo "$OPERATIONS" | jq -r '.OperationSummaryList[0] // {}' 2>/dev/null || echo "{}")
+                if [ "$LATEST_OP" != "{}" ] && [ -n "$LATEST_OP" ]; then
+                  OPERATION_ID=$(echo "$LATEST_OP" | jq -r '.Id // ""' 2>/dev/null || echo "")
+                  OPERATION_TYPE=$(echo "$LATEST_OP" | jq -r '.Type // ""' 2>/dev/null || echo "")
+                  OPERATION_STATUS=$(echo "$LATEST_OP" | jq -r '.Status // ""' 2>/dev/null || echo "")
+                  
                   echo "Operation ID: $OPERATION_ID"
+                  echo "Operation Type: $OPERATION_TYPE"
+                  echo "Operation Status: $OPERATION_STATUS"
+                  
+                  # Try to get detailed operation info
+                  if [ -n "$OPERATION_ID" ]; then
+                    echo ""
+                    echo "Getting detailed operation information..."
+                    OP_DETAILS=$(aws apprunner describe-operation \
+                      --operation-id "$OPERATION_ID" \
+                      --region ${{ env.AWS_REGION }} \
+                      --output json 2>/dev/null || echo "{}")
+                    
+                    OP_ERROR=$(echo "$OP_DETAILS" | jq -r '.Operation.ErrorMessage // .Operation.ErrorCode // "No error details"' 2>/dev/null || echo "Could not parse")
+                    echo "Operation Error: $OP_ERROR"
+                  fi
                 fi
+                
+                echo ""
+                echo "=== Service Configuration ==="
+                echo "$SERVICE_DETAILS" | jq '.Service | {Status, StatusMessage, SourceConfiguration, InstanceConfiguration}' 2>/dev/null || echo "Could not parse service details"
               fi
               exit 1
             fi
@@ -464,7 +501,30 @@ jobs:
           done
           
           if [ "$SERVICE_STATUS" != "RUNNING" ]; then
-            echo "Service did not reach RUNNING state in time. Final status: $SERVICE_STATUS"
+            echo "=== Service did not reach RUNNING state in time ==="
+            echo "Final status: $SERVICE_STATUS"
+            
+            if [ -n "$SERVICE_ARN" ]; then
+              echo ""
+              echo "Getting final service status..."
+              SERVICE_DETAILS=$(aws apprunner describe-service \
+                --service-arn "$SERVICE_ARN" \
+                --region ${{ env.AWS_REGION }} \
+                --output json 2>/dev/null || echo "{}")
+              
+              STATUS_MSG=$(echo "$SERVICE_DETAILS" | jq -r '.Service.StatusMessage // "No status message"' 2>/dev/null || echo "Could not parse")
+              echo "Status message: $STATUS_MSG"
+              
+              # Check if it's still in progress
+              if [ "$SERVICE_STATUS" = "OPERATION_IN_PROGRESS" ]; then
+                echo ""
+                echo "⚠️  Service is still in progress. This might take longer than expected."
+                echo "You can check the service status in AWS Console:"
+                echo "https://console.aws.amazon.com/apprunner/home?region=${{ env.AWS_REGION }}#/services/$SERVICE_ARN"
+                echo ""
+                echo "The deployment may still succeed. Please check AWS Console for final status."
+              fi
+            fi
             exit 1
           fi
 
