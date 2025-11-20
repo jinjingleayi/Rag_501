@@ -59,13 +59,51 @@ def init_rag_system():
     embeddings = OpenAIEmbeddings()
     
     # 检查是否存在 FAISS 索引
-    if os.path.exists("faiss_index"):
+    if os.path.exists("faiss_index") and os.path.exists("faiss_index/index.faiss"):
+        print("Loading existing FAISS index...")
         vectorstore = FAISS.load_local("faiss_index", embeddings)
     else:
-        # 如果索引不存在，创建一个空的向量存储
-        # 这通常不应该发生，因为 ingest.py 应该已经创建了索引
-        vectorstore = None
-        print("Warning: FAISS index not found. Please run ingest.py first.")
+        # 如果索引不存在，自动创建
+        print("FAISS index not found. Creating index from data.txt...")
+        try:
+            from langchain.document_loaders import TextLoader
+            from langchain.text_splitter import CharacterTextSplitter
+            
+            # 检查数据文件是否存在
+            data_file = "data.txt"
+            if not os.path.exists(data_file):
+                print(f"Warning: {data_file} not found. Cannot create index.")
+                vectorstore = None
+            else:
+                # 加载文档
+                print(f"Loading document from {data_file}...")
+                loader = TextLoader(data_file, encoding='utf-8')
+                documents = loader.load()
+                
+                # 分割文本
+                print("Splitting documents into chunks...")
+                text_splitter = CharacterTextSplitter(
+                    separator="\n\n",
+                    chunk_size=1000,
+                    chunk_overlap=200,
+                    length_function=len
+                )
+                texts = text_splitter.split_documents(documents)
+                print(f"Split into {len(texts)} chunks")
+                
+                # 创建向量存储
+                print("Creating vector store...")
+                vectorstore = FAISS.from_documents(texts, embeddings)
+                
+                # 保存向量数据库
+                print("Saving vector store to faiss_index...")
+                vectorstore.save_local("faiss_index")
+                print("Index created successfully!")
+        except Exception as e:
+            print(f"Error creating FAISS index: {e}")
+            import traceback
+            traceback.print_exc()
+            vectorstore = None
     
     # 创建 LLM
     llm = OpenAI(temperature=0)
