@@ -266,8 +266,17 @@ def health():
 
 if __name__ == '__main__':
     # 在启动时初始化
-    initialize()
+    try:
+        initialize()
+        print("✅ RAG system initialized successfully")
+    except Exception as e:
+        print(f"❌ Error initializing RAG system: {e}")
+        import traceback
+        traceback.print_exc()
+        # 即使初始化失败，也启动应用（至少健康检查可以工作）
+        qa_chain = None
     
     port = int(os.getenv('PORT', 8080))
+    print(f"🚀 Starting Flask server on port {port}...")
     app.run(host='0.0.0.0', port=port, debug=False)
 
