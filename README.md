@@ -1,109 +1,109 @@
-# RAG 问答应用 - 自动化 CI/CD 部署
+# RAG Q&A Application - Automated CI/CD Deployment
 
-这是一个基于 LangChain 的 RAG（Retrieval-Augmented Generation）问答应用，通过 GitHub Actions (OIDC) 自动部署到 AWS App Runner。
+This is a RAG (Retrieval-Augmented Generation) Q&A application based on LangChain, automatically deployed to AWS App Runner via GitHub Actions (OIDC).
 
-## 项目结构
+## Project Structure
 
 ```
 Rag_501/
-├── app.py                 # Flask Web 应用主文件
-├── ingest.py              # 数据摄取脚本，创建向量索引
-├── data.txt               # 知识库数据文件
-├── requirements.txt       # Python 依赖
-├── Dockerfile             # Docker 镜像构建文件
-├── main.tf                # Terraform 基础设施配置
+├── app.py                 # Flask web application main file
+├── ingest.py              # Data ingestion script to create vector index
+├── data.txt               # Knowledge base data file
+├── requirements.txt       # Python dependencies
+├── Dockerfile             # Docker image build file
+├── main.tf                # Terraform infrastructure configuration
 ├── .github/
 │   └── workflows/
-│       └── deploy.yml     # GitHub Actions CI/CD 工作流
-└── README.md              # 本文件
+│       └── deploy.yml     # GitHub Actions CI/CD workflow
+└── README.md              # This file
 ```
 
-## 部署步骤
+## Deployment Steps
 
-### 1. 准备工作
+### 1. Prerequisites
 
-确保您已安装：
+Ensure you have installed:
 - [Terraform](https://www.terraform.io/downloads) (>= 1.0)
-- [AWS CLI](https://aws.amazon.com/cli/) 并已配置凭证
-- [Docker](https://www.docker.com/) (用于本地测试)
+- [AWS CLI](https://aws.amazon.com/cli/) with configured credentials
+- [Docker](https://www.docker.com/) (for local testing)
 
-### 2. 使用 Terraform 创建 AWS 基础设施
+### 2. Create AWS Infrastructure with Terraform
 
-在项目根目录下运行以下命令：
+Run the following commands in the project root directory:
 
 ```bash
-# 初始化 Terraform
+# Initialize Terraform
 terraform init
 
-# 应用配置（创建所有 AWS 资源）
-TF_VAR_manage_apprunner_via_terraform=true \
-TF_VAR_github_org_or_user=jinjingleayi \
-TF_VAR_github_repo_name=Rag_501 \
+# Apply configuration (create all AWS resources)
+TF_VAR_manage_apprunner_via_terraform=false \
+TF_VAR_github_org_or_user=your_github_username \
+TF_VAR_github_repo_name=your_repo_name \
 TF_VAR_openai_api_key="your-openai-api-key-here" \
 terraform apply -auto-approve
 ```
 
-**重要输出值**：Terraform 会输出以下值，请保存它们：
+**Important Output Values**: Terraform will output the following values, please save them:
 
-- `github_actions_role_arn` → 用于 GitHub Secret: `AWS_IAM_ROLE_TO_ASSUME`
-- `ecr_repository_name` → 用于 GitHub Secret: `ECR_REPOSITORY`
-- `apprunner_service_arn` → 用于 GitHub Secret: `APP_RUNNER_ARN`（如果服务由 GitHub Actions 创建，此值可能为空）
-- `apprunner_access_role_arn` → 用于 GitHub Secret: `APP_RUNNER_ACCESS_ROLE_ARN`
-- `apprunner_instance_role_arn` → 用于 GitHub Secret: `APP_RUNNER_INSTANCE_ROLE_ARN`
+- `github_actions_role_arn` → For GitHub Secret: `AWS_IAM_ROLE_TO_ASSUME`
+- `ecr_repository_name` → For GitHub Secret: `ECR_REPOSITORY`
+- `apprunner_service_arn` → For GitHub Secret: `APP_RUNNER_ARN` (optional, may be empty if service is created by GitHub Actions)
+- `apprunner_access_role_arn` → Used internally by workflow (dynamically retrieved)
+- `apprunner_instance_role_arn` → Used internally by workflow (dynamically retrieved)
 
-### 3. 配置 GitHub Secrets
+### 3. Configure GitHub Secrets
 
-在您的 GitHub 仓库 `https://github.com/jinjingleayi/Rag_501` 中：
+In your GitHub repository:
 
-1. 进入 **Settings** > **Secrets and variables** > **Actions**
-2. 点击 **New repository secret**
-3. 添加以下 6 个 Secrets：
+1. Go to **Settings** > **Secrets and variables** > **Actions**
+2. Click **New repository secret**
+3. Add the following 4 Secrets:
 
-| Secret 名称 | 值来源 | 示例值 |
-|------------|--------|--------|
-| `AWS_REGION` | 固定值 | `us-east-1` |
+| Secret Name | Value Source | Example Value |
+|------------|--------------|---------------|
+| `AWS_REGION` | Fixed value | `us-east-1` |
 | `ECR_REPOSITORY` | Terraform output `ecr_repository_name` | `bee-edu-rag-app` |
-| `APP_RUNNER_ARN` | Terraform output `apprunner_service_arn` | `arn:aws:apprunner:us-east-1:...`（可选，如果服务由 GitHub Actions 创建） |
+| `APP_RUNNER_ARN` | Terraform output `apprunner_service_arn` | `arn:aws:apprunner:us-east-1:...` (optional, if service is created by GitHub Actions) |
 | `AWS_IAM_ROLE_TO_ASSUME` | Terraform output `github_actions_role_arn` | `arn:aws:iam::...:role/github-actions-deploy-role` |
-| `APP_RUNNER_ACCESS_ROLE_ARN` | Terraform output `apprunner_access_role_arn` | `arn:aws:iam::...:role/bee-edu-apprunner-role` |
-| `APP_RUNNER_INSTANCE_ROLE_ARN` | Terraform output `apprunner_instance_role_arn` | `arn:aws:iam::...:role/bee-edu-apprunner-instance-role` |
 
-### 4. 推送代码到 GitHub
+**Note**: The workflow automatically retrieves `apprunner_access_role_arn` and `apprunner_instance_role_arn` from IAM, so they don't need to be added as secrets.
+
+### 4. Push Code to GitHub
 
 ```bash
-# 初始化 Git 仓库（如果还没有）
+# Initialize Git repository (if not already done)
 git init
 
-# 添加所有文件
+# Add all files
 git add .
 
-# 提交
+# Commit
 git commit -m "Initial commit: RAG app with CI/CD"
 
-# 添加远程仓库
-git remote add origin https://github.com/jinjingleayi/Rag_501.git
+# Add remote repository
+git remote add origin https://github.com/your_username/your_repo_name.git
 
-# 推送到 main 分支（这将触发 GitHub Actions）
+# Push to main branch (this will trigger GitHub Actions)
 git branch -M main
 git push -u origin main
 ```
 
-### 5. 验证部署
+### 5. Verify Deployment
 
-1. **检查 GitHub Actions**：
-   - 进入仓库的 **Actions** 标签页
-   - 查看工作流执行状态
-   - 确保所有步骤都成功
+1. **Check GitHub Actions**:
+   - Go to the repository's **Actions** tab
+   - View workflow execution status
+   - Ensure all steps are successful
 
-2. **获取 App Runner URL**：
-   - 登录 AWS Console
-   - 进入 App Runner 服务
-   - 找到服务 `bee-edu-rag-service`
-   - 复制服务 URL（格式：`https://xxxxx.us-east-1.awsapprunner.com`）
+2. **Get App Runner URL**:
+   - Log in to AWS Console
+   - Go to App Runner service
+   - Find service `bee-edu-rag-service`
+   - Copy the service URL (format: `https://xxxxx.us-east-1.awsapprunner.com`)
 
-3. **测试应用**：
-   - 访问 App Runner URL
-   - 在网页中输入问题测试 RAG 功能
+3. **Test the Application**:
+   - Visit the App Runner URL
+   - Enter questions in the web page to test RAG functionality
 
 ### 6. Configure Cloudflare Custom Domain (Optional)
 
@@ -172,96 +172,95 @@ Once the domain status is `active`, you can access your application at:
 - DNS propagation typically takes 5-15 minutes
 - SSL certificate validation may take 10-30 minutes
 
-## 本地开发
+## Local Development
 
-### 运行数据摄取
+### Run Data Ingestion
 
 ```bash
-# 设置 OpenAI API Key
+# Set OpenAI API Key
 export OPENAI_API_KEY="your-api-key"
 
-# 运行摄取脚本
+# Run ingestion script
 python ingest.py
 ```
 
-### 运行应用
+### Run Application
 
 ```bash
-# 设置 OpenAI API Key
+# Set OpenAI API Key
 export OPENAI_API_KEY="your-api-key"
 
-# 运行 Flask 应用
+# Run Flask application
 python app.py
 ```
 
-应用将在 `http://localhost:8080` 启动。
+The application will start at `http://localhost:8080`.
 
-### 本地 Docker 测试
+### Local Docker Testing
 
 ```bash
-# 构建镜像
+# Build image
 docker build -t rag-app:local .
 
-# 运行容器
+# Run container
 docker run -p 8080:8080 -e OPENAI_API_KEY="your-api-key" rag-app:local
 ```
 
-## CI/CD 工作流说明
+## CI/CD Workflow Description
 
-`.github/workflows/deploy.yml` 工作流在每次推送到 `main` 分支时自动执行：
+The `.github/workflows/deploy.yml` workflow automatically executes on every push to the `main` branch:
 
-1. **Checkout code**：检出代码
-2. **Configure AWS credentials**：使用 OIDC 无密钥认证登录 AWS
-3. **Log in to ECR**：登录 Amazon ECR
-4. **Build and push Docker image**：构建 Docker 镜像并推送到 ECR
-5. **Get App Runner service details**：获取 App Runner 服务配置
-6. **Deploy to AWS App Runner**：部署新镜像到 App Runner
+1. **Checkout code**: Check out the code
+2. **Configure AWS credentials**: Log in to AWS using OIDC keyless authentication
+3. **Log in to ECR**: Log in to Amazon ECR
+4. **Build and push Docker image**: Build Docker image and push to ECR
+5. **Get App Runner service details**: Retrieve App Runner service configuration
+6. **Deploy to AWS App Runner**: Deploy new image to App Runner
 
-## 技术栈
+## Tech Stack
 
-- **后端框架**：Flask
-- **AI 框架**：LangChain
-- **向量数据库**：FAISS
-- **LLM**：OpenAI GPT
-- **容器化**：Docker
-- **基础设施即代码**：Terraform
-- **CI/CD**：GitHub Actions
-- **云服务**：AWS (ECR, App Runner, Secrets Manager, IAM)
+- **Backend Framework**: Flask
+- **AI Framework**: LangChain
+- **Vector Database**: FAISS
+- **LLM**: OpenAI GPT
+- **Containerization**: Docker
+- **Infrastructure as Code**: Terraform
+- **CI/CD**: GitHub Actions
+- **Cloud Services**: AWS (ECR, App Runner, Secrets Manager, IAM)
 
-## 故障排除
+## Troubleshooting
 
-### Terraform 错误
+### Terraform Errors
 
-- 确保 AWS CLI 已配置正确的凭证
-- 检查 Terraform 版本（需要 >= 1.0）
-- 确保所有必需的变量都已设置
+- Ensure AWS CLI is configured with correct credentials
+- Check Terraform version (requires >= 1.0)
+- Ensure all required variables are set
 
-### GitHub Actions 失败
+### GitHub Actions Failures
 
-- 检查所有 GitHub Secrets 是否正确配置
-- 验证 IAM 角色权限
-- 查看 Actions 日志获取详细错误信息
+- Check that all GitHub Secrets are correctly configured
+- Verify IAM role permissions
+- View Actions logs for detailed error messages
 
-### App Runner 部署失败
+### App Runner Deployment Failures
 
-- 检查 Docker 镜像是否成功推送到 ECR
-- 验证 Secrets Manager 中的 OpenAI API Key
-- 查看 App Runner 服务日志
+- Check if Docker image was successfully pushed to ECR
+- Verify OpenAI API Key in Secrets Manager
+- View App Runner service logs
 
-### 应用无法访问
+### Application Not Accessible
 
-- 检查 App Runner 服务状态是否为 "Running"
-- 验证健康检查端点：`https://your-url/health`
-- 检查 Cloudflare DNS 配置
+- Check if App Runner service status is "Running"
+- Verify health check endpoint: `https://your-url/health`
+- Check Cloudflare DNS configuration
 
-## 许可证
+## License
 
-本项目用于教育目的。
+This project is for educational purposes.
 
-## 参考资源
+## Reference Resources
 
-- [LangChain 文档](https://python.langchain.com/)
-- [AWS App Runner 文档](https://docs.aws.amazon.com/apprunner/)
+- [LangChain Documentation](https://python.langchain.com/)
+- [AWS App Runner Documentation](https://docs.aws.amazon.com/apprunner/)
 - [GitHub Actions OIDC](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services)
 - [Terraform AWS Provider](https://registry.terraform.io/providers/hashicorp/aws/latest/docs)
-
