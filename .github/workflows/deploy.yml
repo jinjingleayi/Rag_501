@@ -117,11 +117,23 @@ jobs:
             --output text 2>/dev/null || echo "")
           
           if [ -z "$SECRET_ARN" ] || [ "$SECRET_ARN" == "None" ]; then
-            echo "Warning: Secret 'bee-edu-openai-key-secret' not found in Secrets Manager"
+            echo "Error: Secret 'bee-edu-openai-key-secret' not found in Secrets Manager"
+            echo "Please ensure the secret exists in region ${{ env.AWS_REGION }}"
             echo "secret_arn=" >> $GITHUB_OUTPUT
+            exit 1
           else
+            # 验证 ARN 格式
+            if [[ ! "$SECRET_ARN" =~ ^arn:aws:secretsmanager: ]]; then
+              echo "Error: Invalid secret ARN format: $SECRET_ARN"
+              exit 1
+            fi
             echo "secret_arn=$SECRET_ARN" >> $GITHUB_OUTPUT
             echo "Found secret ARN: $SECRET_ARN"
+            
+            # 验证实例角色是否有权限读取该 secret
+            INSTANCE_ROLE_ARN="${{ steps.get-apprunner-details.outputs.instance_role_arn }}"
+            echo "Verifying instance role permissions..."
+            echo "Instance Role ARN: $INSTANCE_ROLE_ARN"
           fi
 
       - name: Check if App Runner service exists
@@ -171,6 +183,14 @@ jobs:
         run: |
           SERVICE_NAME="${{ steps.get-apprunner-details.outputs.service_name }}"
           IMAGE_URI="${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.set-image-tag.outputs.tag }}"
+          SECRET_ARN="${{ steps.get-secrets-arn.outputs.secret_arn }}"
+          
+          echo "=== Deployment Configuration ==="
+          echo "Service Name: $SERVICE_NAME"
+          echo "Image URI: $IMAGE_URI"
+          echo "Secret ARN: $SECRET_ARN"
+          echo "Access Role ARN: ${{ steps.get-apprunner-details.outputs.access_role_arn }}"
+          echo "Instance Role ARN: ${{ steps.get-apprunner-details.outputs.instance_role_arn }}"
           
           # 创建 JSON 配置文件
           cat > /tmp/service-config.json <<EOF
@@ -181,7 +201,7 @@ jobs:
               "ImageConfiguration": {
                 "Port": "8080",
                 "RuntimeEnvironmentSecrets": {
-                  "OPENAI_API_KEY": "${{ steps.get-secrets-arn.outputs.secret_arn }}"
+                  "OPENAI_API_KEY": "$SECRET_ARN"
                 }
               }
             },
@@ -191,6 +211,10 @@ jobs:
             "AutoDeploymentsEnabled": false
           }
           EOF
+          
+          echo "=== Service Configuration JSON ==="
+          cat /tmp/service-config.json
+          echo ""
           
           # 创建健康检查配置
           cat > /tmp/health-check-config.json <<EOF
@@ -220,20 +244,40 @@ jobs:
           
           if [ -n "$EXISTING_SERVICE" ] && [ "$EXISTING_SERVICE" != "None" ]; then
             echo "Service exists, updating..."
-            aws apprunner update-service \
+            UPDATE_RESULT=$(aws apprunner update-service \
               --service-arn "$EXISTING_SERVICE" \
               --region ${{ env.AWS_REGION }} \
               --source-configuration file:///tmp/service-config.json \
               --instance-configuration file:///tmp/instance-config.json \
-              --health-check-configuration file:///tmp/health-check-config.json
+              --health-check-configuration file:///tmp/health-check-config.json \
+              --output json 2>&1)
+            
+            if [ $? -eq 0 ]; then
+              echo "Service update initiated successfully"
+              echo "$UPDATE_RESULT" | jq '.'
+            else
+              echo "Error updating service:"
+              echo "$UPDATE_RESULT"
+              exit 1
+            fi
           else
             echo "Creating new service with Secrets Manager..."
-            aws apprunner create-service \
+            CREATE_RESULT=$(aws apprunner create-service \
               --service-name "$SERVICE_NAME" \
               --region ${{ env.AWS_REGION }} \
               --source-configuration file:///tmp/service-config.json \
               --instance-configuration file:///tmp/instance-config.json \
-              --health-check-configuration file:///tmp/health-check-config.json
+              --health-check-configuration file:///tmp/health-check-config.json \
+              --output json 2>&1)
+            
+            if [ $? -eq 0 ]; then
+              echo "Service creation initiated successfully"
+              echo "$CREATE_RESULT" | jq '.'
+            else
+              echo "Error creating service:"
+              echo "$CREATE_RESULT"
+              exit 1
+            fi
           fi
 
       - name: Wait for service stability

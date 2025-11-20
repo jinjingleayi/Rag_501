@@ -9,11 +9,11 @@ ls -la
 echo ""
 echo "=== Checking OPENAI_API_KEY ==="
 if [ -z "${OPENAI_API_KEY:-}" ]; then
-  echo "ERROR: OPENAI_API_KEY is not set!"
-  echo "Please configure the secret in App Runner."
-  exit 1
+  echo "WARNING: OPENAI_API_KEY is not set as environment variable."
+  echo "The application will attempt to retrieve it from AWS Secrets Manager."
+  echo "If this fails, the application will not work correctly."
 else
-  echo "OPENAI_API_KEY is set (length: ${#OPENAI_API_KEY})"
+  echo "OPENAI_API_KEY is set as environment variable (length: ${#OPENAI_API_KEY})"
 fi
 
 echo ""
