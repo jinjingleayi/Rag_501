@@ -187,7 +187,20 @@ jobs:
             },
             "AuthenticationConfiguration": {
               "AccessRoleArn": "${{ steps.get-apprunner-details.outputs.access_role_arn }}"
-            }
+            },
+            "AutoDeploymentsEnabled": false
+          }
+          EOF
+          
+          # 创建健康检查配置
+          cat > /tmp/health-check-config.json <<EOF
+          {
+            "Protocol": "HTTP",
+            "Path": "/health",
+            "Interval": 10,
+            "Timeout": 5,
+            "HealthyThreshold": 1,
+            "UnhealthyThreshold": 5
           }
           EOF
           
@@ -211,14 +224,16 @@ jobs:
               --service-arn "$EXISTING_SERVICE" \
               --region ${{ env.AWS_REGION }} \
               --source-configuration file:///tmp/service-config.json \
-              --instance-configuration file:///tmp/instance-config.json
+              --instance-configuration file:///tmp/instance-config.json \
+              --health-check-configuration file:///tmp/health-check-config.json
           else
             echo "Creating new service with Secrets Manager..."
             aws apprunner create-service \
               --service-name "$SERVICE_NAME" \
               --region ${{ env.AWS_REGION }} \
               --source-configuration file:///tmp/service-config.json \
-              --instance-configuration file:///tmp/instance-config.json
+              --instance-configuration file:///tmp/instance-config.json \
+              --health-check-configuration file:///tmp/health-check-config.json
           fi
 
       - name: Wait for service stability
