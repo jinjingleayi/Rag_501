@@ -172,6 +172,33 @@ jobs:
           SERVICE_NAME="${{ steps.get-apprunner-details.outputs.service_name }}"
           IMAGE_URI="${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.set-image-tag.outputs.tag }}"
           
+          # 创建 JSON 配置文件
+          cat > /tmp/service-config.json <<EOF
+          {
+            "ImageRepository": {
+              "ImageIdentifier": "$IMAGE_URI",
+              "ImageRepositoryType": "ECR",
+              "ImageConfiguration": {
+                "Port": "8080",
+                "RuntimeEnvironmentSecrets": {
+                  "OPENAI_API_KEY": "${{ steps.get-secrets-arn.outputs.secret_arn }}"
+                }
+              }
+            },
+            "AuthenticationConfiguration": {
+              "AccessRoleArn": "${{ steps.get-apprunner-details.outputs.access_role_arn }}"
+            }
+          }
+          EOF
+          
+          cat > /tmp/instance-config.json <<EOF
+          {
+            "Cpu": "1024",
+            "Memory": "2048",
+            "InstanceRoleArn": "${{ steps.get-apprunner-details.outputs.instance_role_arn }}"
+          }
+          EOF
+          
           # 检查服务是否存在且正常运行
           EXISTING_SERVICE=$(aws apprunner list-services \
             --region ${{ env.AWS_REGION }} \
@@ -183,52 +210,15 @@ jobs:
             aws apprunner update-service \
               --service-arn "$EXISTING_SERVICE" \
               --region ${{ env.AWS_REGION }} \
-              --source-configuration "{
-                \"ImageRepository\": {
-                  \"ImageIdentifier\": \"$IMAGE_URI\",
-                  \"ImageRepositoryType\": \"ECR\",
-                  \"ImageConfiguration\": {
-                    \"Port\": \"8080\",
-                    \"RuntimeEnvironmentSecrets\": {
-                      \"OPENAI_API_KEY\": \"${{ steps.get-secrets-arn.outputs.secret_arn }}\"
-                    }
-                  }
-                },
-                \"AuthenticationConfiguration\": {
-                  \"AccessRoleArn\": \"${{ steps.get-apprunner-details.outputs.access_role_arn }}\"
-                }
-              }" \
-              --instance-configuration "{
-                \"Cpu\": \"1024\",
-                \"Memory\": \"2048\",
-                \"InstanceRoleArn\": \"${{ steps.get-apprunner-details.outputs.instance_role_arn }}\"
-              }"
+              --source-configuration file:///tmp/service-config.json \
+              --instance-configuration file:///tmp/instance-config.json
           else
             echo "Creating new service with Secrets Manager..."
             aws apprunner create-service \
               --service-name "$SERVICE_NAME" \
               --region ${{ env.AWS_REGION }} \
-              --source-configuration "{
-                \"ImageRepository\": {
-                  \"ImageIdentifier\": \"$IMAGE_URI\",
-                  \"ImageRepositoryType\": \"ECR\",
-                  \"ImageConfiguration\": {
-                    \"Port\": \"8080\",
-                    \"RuntimeEnvironmentSecrets\": {
-                      \"OPENAI_API_KEY\": \"${{ steps.get-secrets-arn.outputs.secret_arn }}\"
-                    }
-                  }
-                },
-                \"AuthenticationConfiguration\": {
-                  \"AccessRoleArn\": \"${{ steps.get-apprunner-details.outputs.access_role_arn }}\"
-                }
-              }" \
-              --instance-configuration "{
-                \"Cpu\": \"1024\",
-                \"Memory\": \"2048\",
-                \"InstanceRoleArn\": \"${{ steps.get-apprunner-details.outputs.instance_role_arn }}\"
-              }" \
-              --auto-scaling-configuration-arn "arn:aws:apprunner:${{ env.AWS_REGION }}:542335186724:autoscalingconfiguration/DefaultConfiguration/1/00000000000000000000000000000001"
+              --source-configuration file:///tmp/service-config.json \
+              --instance-configuration file:///tmp/instance-config.json
           fi
 
       - name: Wait for service stability
@@ -237,16 +227,31 @@ jobs:
           echo "Waiting for service to become stable..."
           
           for i in {1..60}; do
-            SERVICE_STATUS=$(aws apprunner list-services \
+            SERVICE_INFO=$(aws apprunner list-services \
               --region ${{ env.AWS_REGION }} \
-              --query "ServiceSummaryList[?ServiceName=='$SERVICE_NAME'].Status" \
-              --output text 2>/dev/null || echo "")
+              --query "ServiceSummaryList[?ServiceName=='$SERVICE_NAME']" \
+              --output json 2>/dev/null || echo "[]")
+            
+            SERVICE_STATUS=$(echo "$SERVICE_INFO" | jq -r '.[0].Status // "NOT_FOUND"')
+            SERVICE_ARN=$(echo "$SERVICE_INFO" | jq -r '.[0].ServiceArn // ""')
             
             if [ "$SERVICE_STATUS" = "RUNNING" ]; then
               echo "Service is RUNNING!"
+              echo "Service ARN: $SERVICE_ARN"
               break
             elif [ "$SERVICE_STATUS" = "CREATE_FAILED" ] || [ "$SERVICE_STATUS" = "UPDATE_FAILED" ]; then
               echo "Service creation/update failed!"
+              if [ -n "$SERVICE_ARN" ]; then
+                echo "Getting operation details..."
+                OPERATION_ID=$(aws apprunner list-operations \
+                  --service-arn "$SERVICE_ARN" \
+                  --region ${{ env.AWS_REGION }} \
+                  --query 'OperationSummaryList[0].Id' \
+                  --output text 2>/dev/null || echo "")
+                if [ -n "$OPERATION_ID" ]; then
+                  echo "Operation ID: $OPERATION_ID"
+                fi
+              fi
               exit 1
             fi
             
@@ -255,7 +260,7 @@ jobs:
           done
           
           if [ "$SERVICE_STATUS" != "RUNNING" ]; then
-            echo "Service did not reach RUNNING state in time"
+            echo "Service did not reach RUNNING state in time. Final status: $SERVICE_STATUS"
             exit 1
           fi
 
