@@ -298,20 +298,50 @@ jobs:
             fi
           else
             echo "Creating new service with Secrets Manager..."
-            CREATE_RESULT=$(aws apprunner create-service \
+            
+            # Validate JSON files before sending
+            echo "Validating JSON configuration files..."
+            jq . /tmp/service-config.json > /dev/null || { echo "Invalid service-config.json"; exit 1; }
+            jq . /tmp/instance-config.json > /dev/null || { echo "Invalid instance-config.json"; exit 1; }
+            jq . /tmp/health-check-config.json > /dev/null || { echo "Invalid health-check-config.json"; exit 1; }
+            echo "JSON files are valid"
+            
+            # Attempt to create service and capture both stdout and stderr
+            set +e
+            CREATE_OUTPUT=$(aws apprunner create-service \
               --service-name "$SERVICE_NAME" \
               --region ${{ env.AWS_REGION }} \
               --source-configuration file:///tmp/service-config.json \
               --instance-configuration file:///tmp/instance-config.json \
               --health-check-configuration file:///tmp/health-check-config.json \
               --output json 2>&1)
+            CREATE_EXIT_CODE=$?
+            set -e
             
-            if [ $? -eq 0 ]; then
+            if [ $CREATE_EXIT_CODE -eq 0 ]; then
               echo "Service creation initiated successfully"
-              echo "$CREATE_RESULT" | jq '.'
+              echo "$CREATE_OUTPUT" | jq '.' || echo "$CREATE_OUTPUT"
             else
-              echo "Error creating service:"
-              echo "$CREATE_RESULT"
+              echo "=== Error creating service ==="
+              echo "Exit code: $CREATE_EXIT_CODE"
+              echo "Error output:"
+              echo "$CREATE_OUTPUT"
+              
+              # Try to extract error message if it's JSON
+              ERROR_MSG=$(echo "$CREATE_OUTPUT" | jq -r '.message // .Message // .' 2>/dev/null || echo "$CREATE_OUTPUT")
+              echo ""
+              echo "Error message: $ERROR_MSG"
+              
+              # Check for common issues
+              if echo "$CREATE_OUTPUT" | grep -qi "permission"; then
+                echo ""
+                echo "⚠️  Permission issue detected. Please check IAM roles and policies."
+              fi
+              if echo "$CREATE_OUTPUT" | grep -qi "invalid"; then
+                echo ""
+                echo "⚠️  Invalid configuration detected. Please check the JSON structure."
+              fi
+              
               exit 1
             fi
           fi
