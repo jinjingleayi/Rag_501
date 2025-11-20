@@ -9,14 +9,93 @@ Rag_501/
 ├── app.py                 # Flask web application main file
 ├── ingest.py              # Data ingestion script to create vector index
 ├── data.txt               # Knowledge base data file
+├── faiss_index/           # Pre-built FAISS vector index (included in repo)
 ├── requirements.txt       # Python dependencies
 ├── Dockerfile             # Docker image build file
+├── docker-entrypoint.sh   # Container startup script
 ├── main.tf                # Terraform infrastructure configuration
 ├── .github/
 │   └── workflows/
 │       └── deploy.yml     # GitHub Actions CI/CD workflow
 └── README.md              # This file
 ```
+
+## What the Code Does
+
+### Terraform (`main.tf`)
+
+Creates AWS infrastructure:
+
+- **GitHub OIDC Provider**: Enables GitHub Actions to authenticate with AWS without storing credentials
+- **IAM Roles**:
+  - `github-actions-deploy-role`: Allows GitHub Actions to push to ECR and deploy to App Runner
+  - `bee-edu-apprunner-role`: Allows App Runner to pull images from ECR
+  - `bee-edu-apprunner-instance-role`: Allows App Runner instances to read from Secrets Manager
+- **ECR Repository**: Stores Docker images
+- **Secrets Manager Secret**: Stores OpenAI API key securely
+- **IAM Policies**: Grants necessary permissions for ECR, Secrets Manager, and App Runner operations
+
+### GitHub Actions Workflow (`.github/workflows/deploy.yml`)
+
+Automated deployment pipeline that runs on every push to `main`:
+
+1. **Checkout code**: Retrieves the latest code from repository
+2. **Configure AWS credentials**: Uses OIDC to authenticate with AWS (no stored credentials)
+3. **Log in to ECR**: Authenticates with Amazon ECR
+4. **Build and push Docker image**: 
+   - Builds Docker image for `linux/amd64` platform
+   - Tags with commit SHA (first 7 characters) and `latest`
+   - Pushes to ECR repository
+5. **Get App Runner service details**: 
+   - Dynamically retrieves IAM role ARNs from AWS IAM
+   - Checks if App Runner service exists
+6. **Get or create Secrets Manager secret**:
+   - Checks if `bee-edu-openai-key-secret` exists
+   - Creates it automatically if missing (using GitHub Secret `OPENAI_API_KEY` if available)
+   - Validates secret accessibility
+7. **Deploy to App Runner**:
+   - Creates new service if it doesn't exist
+   - Updates existing service if it exists
+   - Configures `RuntimeEnvironmentSecrets` to inject `OPENAI_API_KEY` from Secrets Manager
+   - Waits for service to become stable (up to 10 minutes)
+   - Handles service state transitions (waits for `OPERATION_IN_PROGRESS` to complete)
+
+### Application Code (`app.py`)
+
+Flask web application with RAG functionality:
+
+- **API Key Retrieval**: 
+  - First checks `OPENAI_API_KEY` environment variable
+  - Falls back to AWS Secrets Manager if not found
+  - Handles both JSON and plain string secret formats
+- **FAISS Index Management**:
+  - Loads pre-built index from `faiss_index/` directory if available
+  - Automatically creates index from `data.txt` if missing
+  - Handles errors gracefully
+- **RAG System**:
+  - Uses LangChain RetrievalQA chain
+  - Retrieves top 3 relevant documents
+  - Generates answers using OpenAI GPT
+- **Endpoints**:
+  - `GET /`: Web interface for Q&A
+  - `POST /api/query`: API endpoint for RAG queries
+  - `GET /health`: Health check endpoint
+
+### Docker Configuration
+
+**Dockerfile**:
+- Base image: `python:3.9-slim`
+- Installs system dependencies (gcc for Python packages)
+- Installs Python dependencies from `requirements.txt`
+- Copies application code and FAISS index
+- Exposes port 8080
+- Runs `docker-entrypoint.sh` on startup
+
+**docker-entrypoint.sh**:
+- Checks for `OPENAI_API_KEY` environment variable (injected by App Runner from Secrets Manager)
+- Verifies FAISS index exists (uses pre-built index from repository)
+- Optionally creates index if missing (requires API key)
+- Starts Flask application
 
 ## Deployment Steps
 
@@ -48,8 +127,8 @@ terraform apply -auto-approve
 - `github_actions_role_arn` → For GitHub Secret: `AWS_IAM_ROLE_TO_ASSUME`
 - `ecr_repository_name` → For GitHub Secret: `ECR_REPOSITORY`
 - `apprunner_service_arn` → For GitHub Secret: `APP_RUNNER_ARN` (optional, may be empty if service is created by GitHub Actions)
-- `apprunner_access_role_arn` → Used internally by workflow (dynamically retrieved)
-- `apprunner_instance_role_arn` → Used internally by workflow (dynamically retrieved)
+
+**Note**: The workflow automatically retrieves `apprunner_access_role_arn` and `apprunner_instance_role_arn` from IAM by role name, so they don't need to be added as secrets.
 
 ### 3. Configure GitHub Secrets
 
@@ -63,10 +142,8 @@ In your GitHub repository:
 |------------|--------------|---------------|
 | `AWS_REGION` | Fixed value | `us-east-1` |
 | `ECR_REPOSITORY` | Terraform output `ecr_repository_name` | `bee-edu-rag-app` |
-| `APP_RUNNER_ARN` | Terraform output `apprunner_service_arn` | `arn:aws:apprunner:us-east-1:...` (optional, if service is created by GitHub Actions) |
+| `APP_RUNNER_ARN` | Terraform output `apprunner_service_arn` | `arn:aws:apprunner:us-east-1:...` (optional) |
 | `AWS_IAM_ROLE_TO_ASSUME` | Terraform output `github_actions_role_arn` | `arn:aws:iam::...:role/github-actions-deploy-role` |
-
-**Note**: The workflow automatically retrieves `apprunner_access_role_arn` and `apprunner_instance_role_arn` from IAM, so they don't need to be added as secrets.
 
 ### 4. Push Code to GitHub
 
@@ -105,72 +182,26 @@ git push -u origin main
    - Visit the App Runner URL
    - Enter questions in the web page to test RAG functionality
 
-### 6. Configure Cloudflare Custom Domain (Optional)
+### 6. Configure Cloudflare Custom Domain
 
-To use a custom domain with your App Runner service:
+To use a custom domain:
 
-#### Step 1: Add Custom Domain in App Runner
+1. **Associate domain in App Runner**:
+   ```bash
+   SERVICE_ARN=$(aws apprunner list-services --region us-east-1 \
+     --query "ServiceSummaryList[?ServiceName=='bee-edu-rag-service'].ServiceArn" \
+     --output text)
+   aws apprunner associate-custom-domain \
+     --service-arn "$SERVICE_ARN" \
+     --domain-name rag.yourdomain.com \
+     --region us-east-1
+   ```
 
-First, you need to associate your custom domain with the App Runner service:
-
-```bash
-# Get your service ARN
-SERVICE_ARN=$(aws apprunner list-services \
-  --region us-east-1 \
-  --query "ServiceSummaryList[?ServiceName=='bee-edu-rag-service'].ServiceArn" \
-  --output text)
-
-# Associate custom domain
-aws apprunner associate-custom-domain \
-  --service-arn "$SERVICE_ARN" \
-  --domain-name rag.yourdomain.com \
-  --region us-east-1
-```
-
-This will return DNS validation records that need to be added to Cloudflare.
-
-#### Step 2: Configure DNS in Cloudflare
-
-1. Log in to your Cloudflare account: https://dash.cloudflare.com/
-2. Select your domain
-3. Go to **DNS** → **Records**
-4. Add the main **CNAME** record:
-   - **Type**: CNAME
-   - **Name**: `rag` (or your desired subdomain)
-   - **Target**: Your App Runner URL (e.g., `ugxaymsvp3.us-east-1.awsapprunner.com`)
-   - **Proxy status**: ⚪ **DNS only** (gray cloud, **NOT** proxied/orange cloud)
-   - Click **Save**
-
-5. Add SSL certificate validation records:
-   - App Runner will provide 2-3 CNAME records for SSL certificate validation
-   - Add each validation record as a CNAME:
-     - **Type**: CNAME
-     - **Name**: The validation record name (e.g., `_xxxxx.rag`)
-     - **Target**: The validation target (e.g., `_xxxxx.acm-validations.aws.`)
-     - **Proxy status**: ⚪ **DNS only** (gray cloud, **required** for validation)
-   - These are temporary records for SSL certificate validation
-
-#### Step 3: Wait for SSL Certificate Validation
-
-- Wait 10-30 minutes for AWS to validate the DNS records and issue the SSL certificate
-- Check the status:
-  ```bash
-  aws apprunner describe-custom-domains \
-    --service-arn "$SERVICE_ARN" \
-    --region us-east-1
-  ```
-- When status changes to `active`, your custom domain is ready
-
-#### Step 4: Verify Access
-
-Once the domain status is `active`, you can access your application at:
-- `https://rag.yourdomain.com`
-
-**Important Notes:**
-- Use **DNS only** (gray cloud) for all CNAME records, not Proxied (orange cloud)
-- App Runner handles SSL certificates automatically through AWS Certificate Manager
-- DNS propagation typically takes 5-15 minutes
-- SSL certificate validation may take 10-30 minutes
+2. **Add DNS records in Cloudflare**:
+   - Add CNAME record: `rag` → `your-apprunner-url.us-east-1.awsapprunner.com`
+   - Use **DNS only** (gray cloud), not Proxied
+   - Add SSL certificate validation records (provided by App Runner) as CNAME with DNS only
+   - Wait 10-30 minutes for SSL certificate validation
 
 ## Local Development
 
@@ -206,17 +237,6 @@ docker build -t rag-app:local .
 docker run -p 8080:8080 -e OPENAI_API_KEY="your-api-key" rag-app:local
 ```
 
-## CI/CD Workflow Description
-
-The `.github/workflows/deploy.yml` workflow automatically executes on every push to the `main` branch:
-
-1. **Checkout code**: Check out the code
-2. **Configure AWS credentials**: Log in to AWS using OIDC keyless authentication
-3. **Log in to ECR**: Log in to Amazon ECR
-4. **Build and push Docker image**: Build Docker image and push to ECR
-5. **Get App Runner service details**: Retrieve App Runner service configuration
-6. **Deploy to AWS App Runner**: Deploy new image to App Runner
-
 ## Tech Stack
 
 - **Backend Framework**: Flask
@@ -225,7 +245,7 @@ The `.github/workflows/deploy.yml` workflow automatically executes on every push
 - **LLM**: OpenAI GPT
 - **Containerization**: Docker
 - **Infrastructure as Code**: Terraform
-- **CI/CD**: GitHub Actions
+- **CI/CD**: GitHub Actions (OIDC authentication)
 - **Cloud Services**: AWS (ECR, App Runner, Secrets Manager, IAM)
 
 ## Troubleshooting
@@ -247,12 +267,13 @@ The `.github/workflows/deploy.yml` workflow automatically executes on every push
 - Check if Docker image was successfully pushed to ECR
 - Verify OpenAI API Key in Secrets Manager
 - View App Runner service logs
+- Check if service is in `OPERATION_IN_PROGRESS` state (workflow will wait)
 
 ### Application Not Accessible
 
 - Check if App Runner service status is "Running"
 - Verify health check endpoint: `https://your-url/health`
-- Check Cloudflare DNS configuration
+- Check if FAISS index exists in the container
 
 ## License
 
