@@ -204,19 +204,25 @@ jobs:
               --query 'Service.Status' \
               --output text 2>/dev/null || echo "")
             
+            echo "Found existing service: $EXISTING_SERVICE"
+            echo "Service status: $SERVICE_STATUS"
+            
             if [ "$SERVICE_STATUS" = "CREATE_FAILED" ] || [ "$SERVICE_STATUS" = "DELETE_FAILED" ]; then
-              echo "Service exists but in failed state, will delete and recreate"
+              echo "Service is in failed state, will delete and recreate"
               echo "service_exists=false" >> $GITHUB_OUTPUT
               echo "service_arn=$EXISTING_SERVICE" >> $GITHUB_OUTPUT
+              echo "service_status=$SERVICE_STATUS" >> $GITHUB_OUTPUT
             else
-              echo "Service exists: $EXISTING_SERVICE"
+              echo "Service exists and can be updated"
               echo "service_exists=true" >> $GITHUB_OUTPUT
               echo "service_arn=$EXISTING_SERVICE" >> $GITHUB_OUTPUT
+              echo "service_status=$SERVICE_STATUS" >> $GITHUB_OUTPUT
             fi
           else
-            echo "Service does not exist"
+            echo "Service does not exist, will create new one"
             echo "service_exists=false" >> $GITHUB_OUTPUT
             echo "service_arn=" >> $GITHUB_OUTPUT
+            echo "service_status=" >> $GITHUB_OUTPUT
           fi
 
       - name: Delete failed service if exists
@@ -287,13 +293,11 @@ jobs:
           }
           EOF
           
-          # 检查服务是否存在且正常运行
-          EXISTING_SERVICE=$(aws apprunner list-services \
-            --region ${{ env.AWS_REGION }} \
-            --query "ServiceSummaryList[?ServiceName=='$SERVICE_NAME' && Status=='RUNNING'].ServiceArn" \
-            --output text 2>/dev/null || echo "")
+          # 使用之前检查的结果
+          EXISTING_SERVICE="${{ steps.check-service.outputs.service_arn }}"
+          SERVICE_EXISTS="${{ steps.check-service.outputs.service_exists }}"
           
-          if [ -n "$EXISTING_SERVICE" ] && [ "$EXISTING_SERVICE" != "None" ]; then
+          if [ "$SERVICE_EXISTS" = "true" ] && [ -n "$EXISTING_SERVICE" ] && [ "$EXISTING_SERVICE" != "None" ]; then
             echo "Service exists, updating..."
             UPDATE_RESULT=$(aws apprunner update-service \
               --service-arn "$EXISTING_SERVICE" \
@@ -321,43 +325,103 @@ jobs:
             jq . /tmp/health-check-config.json > /dev/null || { echo "Invalid health-check-config.json"; exit 1; }
             echo "JSON files are valid"
             
-            # Attempt to create service and capture both stdout and stderr
-            set +e
-            CREATE_OUTPUT=$(aws apprunner create-service \
-              --service-name "$SERVICE_NAME" \
+            # Check if service exists (might have been created between checks)
+            FINAL_CHECK=$(aws apprunner list-services \
               --region ${{ env.AWS_REGION }} \
-              --source-configuration file:///tmp/service-config.json \
-              --instance-configuration file:///tmp/instance-config.json \
-              --health-check-configuration file:///tmp/health-check-config.json \
-              --output json 2>&1)
-            CREATE_EXIT_CODE=$?
-            set -e
+              --query "ServiceSummaryList[?ServiceName=='$SERVICE_NAME'].ServiceArn" \
+              --output text 2>/dev/null || echo "")
             
-            if [ $CREATE_EXIT_CODE -eq 0 ]; then
-              echo "Service creation initiated successfully"
-              echo "$CREATE_OUTPUT" | jq '.' || echo "$CREATE_OUTPUT"
+            if [ -n "$FINAL_CHECK" ] && [ "$FINAL_CHECK" != "None" ]; then
+              echo "Service was created between checks, updating instead..."
+              EXISTING_SERVICE="$FINAL_CHECK"
+              UPDATE_RESULT=$(aws apprunner update-service \
+                --service-arn "$EXISTING_SERVICE" \
+                --region ${{ env.AWS_REGION }} \
+                --source-configuration file:///tmp/service-config.json \
+                --instance-configuration file:///tmp/instance-config.json \
+                --health-check-configuration file:///tmp/health-check-config.json \
+                --output json 2>&1)
+              
+              if [ $? -eq 0 ]; then
+                echo "Service update initiated successfully"
+                echo "$UPDATE_RESULT" | jq '.' || echo "$UPDATE_RESULT"
+              else
+                echo "Error updating service:"
+                echo "$UPDATE_RESULT"
+                exit 1
+              fi
             else
-              echo "=== Error creating service ==="
-              echo "Exit code: $CREATE_EXIT_CODE"
-              echo "Error output:"
-              echo "$CREATE_OUTPUT"
+              # Attempt to create service and capture both stdout and stderr
+              set +e
+              CREATE_OUTPUT=$(aws apprunner create-service \
+                --service-name "$SERVICE_NAME" \
+                --region ${{ env.AWS_REGION }} \
+                --source-configuration file:///tmp/service-config.json \
+                --instance-configuration file:///tmp/instance-config.json \
+                --health-check-configuration file:///tmp/health-check-config.json \
+                --output json 2>&1)
+              CREATE_EXIT_CODE=$?
+              set -e
               
-              # Try to extract error message if it's JSON
-              ERROR_MSG=$(echo "$CREATE_OUTPUT" | jq -r '.message // .Message // .' 2>/dev/null || echo "$CREATE_OUTPUT")
-              echo ""
-              echo "Error message: $ERROR_MSG"
-              
-              # Check for common issues
-              if echo "$CREATE_OUTPUT" | grep -qi "permission"; then
-                echo ""
-                echo "⚠️  Permission issue detected. Please check IAM roles and policies."
+              if [ $CREATE_EXIT_CODE -eq 0 ]; then
+                echo "Service creation initiated successfully"
+                echo "$CREATE_OUTPUT" | jq '.' || echo "$CREATE_OUTPUT"
+              else
+                echo "=== Error creating service ==="
+                echo "Exit code: $CREATE_EXIT_CODE"
+                echo "Error output:"
+                echo "$CREATE_OUTPUT"
+                
+                # Check if error is because service already exists
+                if echo "$CREATE_OUTPUT" | grep -qi "already exists"; then
+                  echo ""
+                  echo "⚠️  Service already exists. Attempting to update instead..."
+                  EXISTING_SERVICE=$(aws apprunner list-services \
+                    --region ${{ env.AWS_REGION }} \
+                    --query "ServiceSummaryList[?ServiceName=='$SERVICE_NAME'].ServiceArn" \
+                    --output text 2>/dev/null || echo "")
+                  
+                  if [ -n "$EXISTING_SERVICE" ] && [ "$EXISTING_SERVICE" != "None" ]; then
+                    echo "Found existing service: $EXISTING_SERVICE"
+                    UPDATE_RESULT=$(aws apprunner update-service \
+                      --service-arn "$EXISTING_SERVICE" \
+                      --region ${{ env.AWS_REGION }} \
+                      --source-configuration file:///tmp/service-config.json \
+                      --instance-configuration file:///tmp/instance-config.json \
+                      --health-check-configuration file:///tmp/health-check-config.json \
+                      --output json 2>&1)
+                    
+                    if [ $? -eq 0 ]; then
+                      echo "Service update initiated successfully"
+                      echo "$UPDATE_RESULT" | jq '.' || echo "$UPDATE_RESULT"
+                    else
+                      echo "Error updating service:"
+                      echo "$UPDATE_RESULT"
+                      exit 1
+                    fi
+                  else
+                    echo "Could not find service ARN for update"
+                    exit 1
+                  fi
+                else
+                  # Try to extract error message if it's JSON
+                  ERROR_MSG=$(echo "$CREATE_OUTPUT" | jq -r '.message // .Message // .' 2>/dev/null || echo "$CREATE_OUTPUT")
+                  echo ""
+                  echo "Error message: $ERROR_MSG"
+                  
+                  # Check for common issues
+                  if echo "$CREATE_OUTPUT" | grep -qi "permission"; then
+                    echo ""
+                    echo "⚠️  Permission issue detected. Please check IAM roles and policies."
+                  fi
+                  if echo "$CREATE_OUTPUT" | grep -qi "invalid"; then
+                    echo ""
+                    echo "⚠️  Invalid configuration detected. Please check the JSON structure."
+                  fi
+                  
+                  exit 1
+                fi
               fi
-              if echo "$CREATE_OUTPUT" | grep -qi "invalid"; then
-                echo ""
-                echo "⚠️  Invalid configuration detected. Please check the JSON structure."
-              fi
-              
-              exit 1
             fi
           fi
 
