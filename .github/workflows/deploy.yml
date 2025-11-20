@@ -171,6 +171,21 @@ jobs:
           # 验证实例角色是否有权限读取该 secret
           INSTANCE_ROLE_ARN="${{ steps.get-apprunner-details.outputs.instance_role_arn }}"
           echo "Instance Role ARN: $INSTANCE_ROLE_ARN"
+          
+          # 验证 secret 可以被访问（使用当前角色的权限测试）
+          echo "Verifying secret accessibility..."
+          SECRET_TEST=$(aws secretsmanager get-secret-value \
+            --secret-id "$SECRET_ARN" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'ARN' \
+            --output text 2>&1)
+          
+          if [[ "$SECRET_TEST" =~ ^arn:aws:secretsmanager: ]]; then
+            echo "✓ Secret is accessible"
+          else
+            echo "⚠️  Warning: Could not verify secret accessibility: $SECRET_TEST"
+            echo "This might indicate a permissions issue, but continuing anyway..."
+          fi
 
       - name: Check if App Runner service exists
         id: check-service
